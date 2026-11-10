@@ -250,12 +250,3 @@ it from drivers-github-tools into this repo first, then use it from here.
 - Generic fixes go upstream to drivers-github-tools too, so drift stays
   visible instead of silent.
 - Run `pre-commit run --all-files` before committing, and `pytest`.
-
-## TODO before this leaves POC
-
-- [ ] Move the repo to mongodb-labs, for ownership rather than for access.
-      The stated reason, that a private personal repo cannot serve composite
-      actions to org repositories, does not apply: this repo is public, and a
-      public repo is usable by any workflow. What a personal repo cannot give
-      is an owner who is not one person. Update the README owner placeholders
-      when the move lands.
