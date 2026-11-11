@@ -7,6 +7,7 @@ that do not need AWS, which is all of it except where the variables come from.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -14,6 +15,13 @@ import pytest
 from conftest import ACTIONS
 
 SETUP = ACTIONS / "setup" / "setup.sh"
+
+# The script runs with a deliberately small environment, so that a variable it needs has to be
+# passed rather than inherited from whoever ran the tests. git's own directory is added because on
+# macOS `/usr/bin/git` is an xcrun shim that cannot load under a stripped environment, which failed
+# the whole file for a reason that had nothing to do with the script.
+_GIT = shutil.which("git")
+PATH = ":".join(dict.fromkeys(([str(Path(_GIT).parent)] if _GIT else []) + ["/usr/bin", "/bin", "/usr/local/bin"]))
 
 SECRET = {
     "GARASIGN_USERNAME": "ai-builder-experience",
@@ -24,9 +32,17 @@ SECRET = {
 
 @pytest.fixture
 def runner(tmp_path: Path) -> dict[str, str]:
-    """A runner's temp directory and a git repository to set an identity in."""
-    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    """A runner's temp directory, and a HOME of its own for the git identity to land in.
+
+    Deliberately not a git repository. An earlier version of this fixture ran `git init` here, which
+    made every test in this file pass while `setup.sh` could not run in a job that checks nothing
+    out -- the shape every artifact-only job has. The fixture was supplying the one thing the script
+    silently required.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
     return {
+        "HOME": str(home),
         "RUNNER_TEMP": str(tmp_path),
         "GITHUB_ENV": str(tmp_path / "github-env"),
         "GITHUB_RUN_ID": "424242",
@@ -42,7 +58,7 @@ def setup(
         ["bash", str(SETUP)],
         check=False,
         cwd=tmp_path,
-        env={"PATH": "/usr/bin:/bin:/usr/local/bin", **runner, **(SECRET | secret)},
+        env={"PATH": PATH, **runner, **(SECRET | secret)},
         capture_output=True,
         text=True,
     )
@@ -135,3 +151,31 @@ def test_the_asset_directories_exist_and_record_the_run(tmp_path: Path, runner) 
     assert (
         Path(env["RELEASE_ASSETS"]) / "release_run_id.txt"
     ).read_text().strip() == "424242"
+
+
+def test_it_runs_in_a_job_that_checked_nothing_out(tmp_path: Path, runner) -> None:
+    """The shape of every artifact-only job: download, sign, upload, no working tree.
+
+    `git config` without `--global` needs a repository, and `set -e` turns that into a failed setup
+    rather than a warning -- so a job wired exactly as the signing guide describes dies on
+    `fatal: not in a git directory` before any credential has been written anywhere.
+    """
+    assert not (tmp_path / ".git").exists(), "this test is meaningless in a repository"
+
+    result = setup(tmp_path, runner)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "not in a git directory" not in result.stderr
+
+
+def test_it_sets_the_bot_identity_where_a_later_checkout_will_find_it(tmp_path: Path, runner) -> None:
+    """Setting it globally is only useful if it is actually readable as the committer identity."""
+    setup(tmp_path, runner)
+
+    shown = subprocess.run(
+        ["git", "config", "--global", "--get", "user.name"],
+        env={"PATH": PATH, "HOME": runner["HOME"]},
+        capture_output=True,
+        text=True,
+    )
+    assert shown.stdout.strip() == "mongodb-dbx-release-bot[bot]", shown.stderr
